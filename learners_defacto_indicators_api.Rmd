@@ -1,0 +1,205 @@
+---
+title: "Learner Data Gathering"
+author: "Mohammed ElDesouky"
+date: "10/14/2024"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Calling libraries 
+library(tidyverse)
+library(dplyr)
+library(httr)
+library(rsdmx)
+library(RJSONIO)
+library(haven)
+library(here)
+
+#Save directory
+save_dir <- here()
+
+```
+
+```{r country setup, include=TRUE}
+#Defining key globals parameters - Adjust here 
+country       = "Central African Republic"
+country_iso3c = "CAF"
+country_iso2c = "CF"
+country_wbcode= "CAF"
+survey_time   = 2023
+max_time      = survey_time-10
+```
+
+```{r dhs api setup, include=FALSE}
+# Defining dhs key globals and parameters
+dhs_endpoint_url  = "https://api.dhsprogram.com/rest/dhs/" 
+data              = "data/"
+dhs_indicators    = c(
+  'CN_MIAC_C_DWM'	='Children given deworming medication in past 6 months'
+)
+
+dhs_full_url = paste0(dhs_endpoint_url, data, names(dhs_indicators))
+
+
+
+# Function to make the GET (query) request and capture fetching errors
+get_dhs_data <- function(url) {
+  tryCatch(
+    {
+      response <- GET(url)
+      if (status_code(response) != 200) {
+        stop("Failed to fetch data: ", status_code(response))
+      }
+      content(response, "text")
+    },
+    error = function(e) {
+      message("An error occurred: ", e$message)
+      NULL
+    }
+  )
+}
+
+```
+
+
+```{r mics api setup, include=FALSE}
+
+#Define SDMX key global and parameters
+endpoint_url  = "https://sdmx.data.unicef.org/ws/public/sdmxapi/rest/" 
+dataflow      = "data/UNICEF,GLOBAL_DATAFLOW,1.0/"
+dataflow_para = c(
+  "detail"= "all",
+  "format"= "sdmx-jason"
+)
+
+#set up query [this part on defining which indicators to pull was extracted from Brian's code -- only adjusted the name for indicator ECD_CHLD_24-59M_ADLT_SRC from ECD_CHLD_36-59M_ADLT_SRC]
+mics_indicators <- c(
+  'NT_IOD_ANY_TH'	='Percentage of households with salt testing positive for any iodide among households',
+  'NT_CF_MDD'='Percentage of children age 6–23 months who had at least the minimum dietary diversity and the minimum meal frequency during the previous day',
+  'NT_BF_EBF'='Percentage of children born in the five (three) years preceding the survey who were ever breastfed',
+  'IM_DTP3'=	'Percentage of children who at age: a) 12-23 months had received all basic vaccinations at any time before the survey, b) 24-35 months had received all vaccinations recommended in the national immunization schedule – DTP vaccine proxy',
+  'MNCH_INSTDEL'='MICS/DHS - Percentage of women age 15-49 years with a live birth in the last 2 years whose most recent live birth was delivered in a health facility',
+  'ECD_CHLD_36-59M_EDU-PGM'='Percentage of children age 36-59 months who are attending ECE',
+  'ECD_CHLD_U5_BKS-HM'='Percentage of children under age 5 who have three or more children’s books',
+  'ECD_CHLD_24-59M_ADLT_SRC'='Percentage of children age 24-59 months engaged in four or more activities to provide early stimulation and responsive care in the last 3 days with any adult in the household',
+  'ECD_CHLD_36-59M_LMPSL' = 'Percentage of children (aged 36-59 months) developmentally on track in at least 3 of the 4 following domains: literacy-numeracy, physical, social-emotional and learning'
+)
+
+mics_indicators_df <- data.frame(indicator_name=mics_indicators, INDICATOR=names(mics_indicators))
+
+full_url = paste0(endpoint_url, dataflow,country_iso3c,'.',paste(names(mics_indicators), collapse="+") ,"/", paste((dataflow_para), collapse="?"))
+
+
+# Function to make the GET (query) request and capture fetching errors
+get_mics_data <- function(url) {
+  tryCatch(
+    {
+      response <- GET(url)
+      if (status_code(response) != 200) {
+        stop("Failed to fetch data: ", status_code(response))
+      }
+      content(response, "text")
+    },
+    error = function(e) {
+      message("An error occurred: ", e$message)
+      NULL
+    }
+  )
+}
+
+```
+
+```{r wb aspire setup, include=FALSE}
+
+WB_aspire_url = "https://datacatalogfiles.worldbank.org/ddh-published/0037942/DR0087109/ASPIRE%20performance%20indicators.zip"
+
+```
+
+
+```{r dhs querying and fetching data, include=TRUE}
+
+# Calling the function, the API and parsing the data
+dhs_response <- get_dhs_data(dhs_full_url)
+if (!is.null(dhs_response)) {
+  print("Data fetched successfully!")
+  
+  #parsing the data into data frame 
+  dhs_json <- fromJSON(dhs_full_url)
+  dhs_json_data <-lapply(dhs_json$Data, function(x) { unlist(x) }) 
+  dhs_data<- as.data.frame(do.call("rbind", dhs_json_data),stringsAsFactors=FALSE) %>% 
+    select(Indicator, CountryName, DHS_CountryCode, IndicatorId, SurveyYear, Value) %>%
+    #removing years older than accepted max 
+    filter(SurveyYear>=max_time) %>% 
+    #extracting only most recent observation for each country
+    group_by(DHS_CountryCode) %>% 
+    filter(SurveyYear == max(SurveyYear, na.rm = T)) %>% 
+    #extracting only observations for country of interest-if exists
+    filter(DHS_CountryCode==country_iso2c)
+    # Tabulate findings
+    xtabs(as.numeric(Value) ~ DHS_CountryCode, data=dhs_data)
+
+} else {
+  print("Failed to fetch data.")
+}
+
+```
+
+
+```{r mics querying and fetching data, include=TRUE}
+
+# Calling the function, the API and parsing the data
+dataflow_response <- get_mics_data(full_url)
+if (!is.null(dataflow_response)) {
+  print("Data fetched successfully!")
+  
+  #parsing the data into data frame 
+  mics_df =readSDMX(full_url, isURL=TRUE) %>%
+    as_tibble() %>%
+    right_join(mics_indicators_df) %>%
+    select(indicator_name, everything())%>%
+    filter(SEX=="_T") %>% 
+    #removing years older than accepted max 
+    filter(TIME_PERIOD>=max_time) %>% 
+    group_by(INDICATOR) %>% 
+    #extracting only most recent observation on selected indicators
+    filter(TIME_PERIOD == max(TIME_PERIOD, na.rm = T))
+    # Tabulate findings
+    xtabs(as.numeric(OBS_VALUE) ~ indicator_name, data=mics_df)
+  
+} else {
+  print("Failed to fetch data.")
+}
+
+```
+
+
+```{r wb aspire downloading and fetching data, include=TRUE}
+
+temp = tempfile()
+download.file(url = WB_aspire_url, temp)
+WB_data = read_dta(unz(temp, "ASPIRE performance indicators.dta")) %>% 
+  filter(Indicator_Code=="per_sa_sf.cov_pop_tot") %>% 
+  filter(Year!="20102020S") %>% 
+  filter(Year!="20102020W") %>% 
+  mutate(Year = as.numeric(Year)) %>% 
+  #removing years older than accepted max 
+  filter(Year>=max_time) %>% 
+  #extracting only most recent observation for each country
+  group_by(Country_Code) %>% 
+  filter(Year == max(Year, na.rm = T))%>% 
+  #extracting only observations for country of interest-if exists
+  filter(Country_Code==country_wbcode)
+  # Tabulate findings
+  xtabs(as.numeric(val) ~ Country_Code, data=WB_data)
+unlink(temp)
+```
+
+```{r saving fetched data, include=FALSE}
+write_excel_csv(dhs_data, paste0(save_dir, "/dhs_data", country_iso3c ,Sys.Date(),'.csv'))
+write_excel_csv(mics_df, paste0(save_dir, "/mics_data_", country_iso3c, Sys.Date(),'.csv'))
+write_excel_csv(WB_data, paste0(save_dir, "/wb_data_", country_iso3c, Sys.Date(),'.csv'))
+
+
+```
